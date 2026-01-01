@@ -11,6 +11,20 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 
+# IFC-GA / MEP Klassen für den 3D-Viewer
+MEP_VIEW_CLASSES = [
+    "IfcPipeSegment", "IfcPipeFitting",
+    "IfcDuctSegment", "IfcDuctFitting",
+    "IfcPump", "IfcValve",
+    "IfcFlowInstrument", "IfcFlowController",
+    "IfcSensor", "IfcActuator",
+    "IfcFan", "IfcCoil",
+    "IfcTank", "IfcHeatExchanger",
+    "IfcUnitaryEquipment",
+    "IfcBuildingElementProxy", "IfcCovering",
+]
+
+
 # ------------------------------------------------------------
 # IFC robust importieren
 # ------------------------------------------------------------
