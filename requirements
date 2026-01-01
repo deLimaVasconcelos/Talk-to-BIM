@@ -1,2 +1,2 @@
 streamlit>=1.35
-ifcopenshell>=0.7.0
+ifcopenshell==0.7.0
