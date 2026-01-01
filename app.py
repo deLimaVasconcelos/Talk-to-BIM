@@ -1,4 +1,3 @@
-```python
 # app.py
 # -*- coding: utf-8 -*-
 
