@@ -344,7 +344,7 @@ if ifcopenshell is None:
 with st.sidebar:
     st.header("IFC laden")
 
-    use_default = st.toggle("Repo-Datei verwenden (default.ifc)", value=False)
+    use_default = st.toggle("Repo-Datei verwenden (default.ifc)", value=True)
     default_path = "default.ifc"
 
     uploaded = None
