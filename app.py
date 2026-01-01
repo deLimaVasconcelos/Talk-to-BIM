@@ -1,4 +1,4 @@
-```python
+
 # app.py
 # -*- coding: utf-8 -*-
 
@@ -463,4 +463,4 @@ with col_chat:
         resp = answer(user_q, ifc, gindex)
         st.session_state.chat.append({"role": "assistant", "content": resp})
         st.rerun()
-```
+
