@@ -498,4 +498,4 @@ with col_chat:
         response = answer(user_q, index)
         st.session_state.chat.append({"role": "assistant", "content": response})
         st.rerun()
-```
+
