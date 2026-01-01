@@ -32,41 +32,20 @@ except Exception:
     IFC_GEOM_OK = False
     ifcgeom = None
 
-# ------------------------------------------------------------
-# Viewer-Klassen (MEP/GA)
-# ------------------------------------------------------------
-MEP_VIEW_CLASSES = [
-    "IfcPipeSegment", "IfcPipeFitting",
-    "IfcDuctSegment", "IfcDuctFitting",
-    "IfcPump", "IfcValve",
-    "IfcFlowInstrument", "IfcFlowController",
-    "IfcSensor", "IfcActuator",
-    "IfcFan", "IfcCoil",
-    "IfcTank", "IfcHeatExchanger",
-    "IfcUnitaryEquipment", "IfcUnitaryControlElement",
-    "IfcBuildingElementProxy", "IfcCovering",
-]
-
-# Optional: einfache Kategorien (für Zusammenfassung/Filter)
-GA_CLASSES: Dict[str, set] = {
-    "Lüftung": {"IfcDuctSegment", "IfcDuctFitting", "IfcFan", "IfcAirTerminal", "IfcDamper"},
-    "Heizen": {"IfcRadiator", "IfcBoiler", "IfcPipeSegment", "IfcHeatExchanger", "IfcBuildingElementProxy"},
-    "Kühlen": {"IfcChiller", "IfcCoolingTower", "IfcCoil", "IfcCovering"},
-    "Licht": {"IfcLightFixture", "IfcLamp"},
-    "Steuerung": {"IfcSensor", "IfcActuator", "IfcController", "IfcAlarm", "IfcUnitaryControlElement"},
-}
 
 # ------------------------------------------------------------
-# Hilfsfunktionen (Text/Properties)
+# Utilities
 # ------------------------------------------------------------
 def normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
+
 
 def safe_str(x) -> str:
     try:
         return str(x) if x is not None else ""
     except Exception:
         return ""
+
 
 def get_psets(element) -> Dict[str, Dict[str, str]]:
     """
@@ -93,53 +72,48 @@ def get_psets(element) -> Dict[str, Dict[str, str]]:
             continue
     return out
 
-def classify_category(ifc_class: str) -> Optional[str]:
-    for cat, clsset in GA_CLASSES.items():
-        if ifc_class in clsset:
-            return cat
-    return None
 
-# ------------------------------------------------------------
-# Modellindex (klassenbasiert; Räume optional)
-# ------------------------------------------------------------
 def count_type(ifc, tname: str) -> int:
     try:
         return len(ifc.by_type(tname) or [])
     except Exception:
         return 0
 
+
+# ------------------------------------------------------------
+# Globaler Index (für Chat) – bewusst generisch
+# ------------------------------------------------------------
 def build_global_index(ifc) -> Dict[str, Any]:
     """
-    Erzeugt einen globalen Index über IfcProduct-Objekte:
-      - Klassenliste
-      - Zählungen
-      - Lookup nach GlobalId (Meta + Psets on demand)
+    Index über IfcRoot (fast alles Relevante hat GlobalId):
+      - class_counts: Anzahl je IFC-Klasse
+      - by_class_ids: GlobalIds je Klasse (nur wenn vorhanden)
+      - lookup: Meta je GlobalId
     """
     class_counts: Dict[str, int] = defaultdict(int)
     by_class_ids: Dict[str, List[str]] = defaultdict(list)
     lookup: Dict[str, Dict[str, Any]] = {}
 
     try:
-        products = ifc.by_type("IfcProduct") or []
+        roots = ifc.by_type("IfcRoot") or []
     except Exception:
-        products = []
+        roots = []
 
-    for e in products:
+    for e in roots:
         try:
-            gid = safe_str(getattr(e, "GlobalId", ""))
-            if not gid:
-                continue
             cls = e.is_a()
             class_counts[cls] += 1
-            by_class_ids[cls].append(gid)
-            lookup[gid] = {
-                "global_id": gid,
-                "ifc_class": cls,
-                "name": safe_str(getattr(e, "Name", "")),
-                "object_type": safe_str(getattr(e, "ObjectType", "")),
-                "predefined_type": safe_str(getattr(e, "PredefinedType", "")),
-                "category": classify_category(cls) or "",
-            }
+
+            gid = safe_str(getattr(e, "GlobalId", ""))
+            if gid:
+                by_class_ids[cls].append(gid)
+                lookup[gid] = {
+                    "global_id": gid,
+                    "ifc_class": cls,
+                    "name": safe_str(getattr(e, "Name", "")),
+                    "object_type": safe_str(getattr(e, "ObjectType", "")),
+                    "predefined_type": safe_str(getattr(e, "PredefinedType", "")),
+                }
         except Exception:
             continue
 
@@ -149,13 +123,13 @@ def build_global_index(ifc) -> Dict[str, Any]:
         "lookup": lookup,
     }
 
+
 def format_item_line(meta: Dict[str, Any]) -> str:
-    cat = meta.get("category", "")
-    cat_part = f"[{cat}] " if cat else ""
-    return f"- {cat_part}{meta.get('ifc_class','')} | {meta.get('name','')} | {meta.get('global_id','')}"
+    return f"- {meta.get('ifc_class','')} | {meta.get('name','')} | {meta.get('global_id','')}"
+
 
 # ------------------------------------------------------------
-# 3D-Viewer (Plotly Mesh3d)
+# Viewer
 # ------------------------------------------------------------
 def _dummy_box_figure(note: str) -> go.Figure:
     fig = go.Figure()
@@ -165,14 +139,21 @@ def _dummy_box_figure(note: str) -> go.Figure:
     I = [0, 0, 4, 4, 0, 0, 3, 3, 0, 0, 1, 1]
     J = [1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 2, 6]
     K = [2, 3, 6, 7, 5, 4, 6, 7, 7, 4, 6, 5]
-    fig.add_trace(go.Mesh3d(x=x, y=y, z=z, i=I, j=J, k=K, opacity=0.35, flatshading=True, showscale=False))
+    fig.add_trace(go.Mesh3d(x=x, y=y, z=z, i=I, j=J, k=K, opacity=0.30, flatshading=True, showscale=False))
     fig.add_annotation(text=note, showarrow=False)
     fig.update_layout(height=560, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
     return fig
 
-def plot_ifc_mesh_by_classes(ifc, classes: Tuple[str, ...]) -> go.Figure:
+
+def plot_ifc_mesh_all_products(ifc, max_products: int = 800) -> Tuple[go.Figure, Dict[str, int]]:
+    """
+    Rendert alle IfcProduct, bei denen create_shape funktioniert.
+    Gibt zusätzlich Statistik zurück (wie viele Produkte versucht/gerendert).
+    """
     if not IFC_GEOM_OK:
-        return _dummy_box_figure("Geometrie-Backend (ifcopenshell.geom) nicht verfügbar → Dummy-Viewer")
+        return _dummy_box_figure("Geometrie-Backend (ifcopenshell.geom) nicht verfügbar → Dummy-Viewer"), {
+            "products_total": 0, "products_used": 0, "rendered": 0
+        }
 
     settings = ifcgeom.settings()
 
@@ -190,41 +171,42 @@ def plot_ifc_mesh_by_classes(ifc, classes: Tuple[str, ...]) -> go.Figure:
     mins = np.array([+1e9, +1e9, +1e9], dtype=float)
     maxs = np.array([-1e9, -1e9, -1e9], dtype=float)
 
-    # Schutzlimit (Cloud/Browser)
-    max_elems_per_class = 800
+    try:
+        products = ifc.by_type("IfcProduct") or []
+    except Exception:
+        products = []
 
-    added = 0
-    for cls in classes:
+    products_total = len(products)
+    products_used = min(products_total, max_products)
+
+    rendered = 0
+
+    for e in products[:products_used]:
         try:
-            elems = ifc.by_type(cls) or []
+            shape = ifcgeom.create_shape(settings, e)
+            verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
+            faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
+
+            mins = np.minimum(mins, verts.min(axis=0))
+            maxs = np.maximum(maxs, verts.max(axis=0))
+
+            fig.add_trace(go.Mesh3d(
+                x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                opacity=0.22,
+                flatshading=True,
+                showscale=False
+            ))
+            rendered += 1
         except Exception:
-            elems = []
-        for e in elems[:max_elems_per_class]:
-            try:
-                shape = ifcgeom.create_shape(settings, e)
-                verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
-                faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
+            continue
 
-                mins = np.minimum(mins, verts.min(axis=0))
-                maxs = np.maximum(maxs, verts.max(axis=0))
+    if rendered == 0:
+        return _dummy_box_figure(
+            "Keine Geometrie gerendert. Das IFC kann trotzdem Daten enthalten; "
+            "ggf. fehlen Repräsentationen oder create_shape schlägt pro Element fehl."
+        ), {"products_total": products_total, "products_used": products_used, "rendered": rendered}
 
-                fig.add_trace(go.Mesh3d(
-                    x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
-                    i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-                    opacity=0.22,
-                    flatshading=True,
-                    name=cls,
-                    showscale=False
-                ))
-                added += 1
-            except Exception:
-                continue
-
-    # Wenn gar nichts gezeichnet wurde: Hinweis + Dummy
-    if added == 0:
-        return _dummy_box_figure("Keine Geometrie für die gewählten Klassen erzeugt → prüfen Sie die Klassenauswahl")
-
-    # Achsen/Range
     if np.all(np.isfinite(mins)) and np.all(np.isfinite(maxs)):
         L = maxs - mins
         L[L <= 0] = 1.0
@@ -243,22 +225,24 @@ def plot_ifc_mesh_by_classes(ifc, classes: Tuple[str, ...]) -> go.Figure:
     else:
         fig.update_layout(height=560, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
 
-    return fig
+    return fig, {"products_total": products_total, "products_used": products_used, "rendered": rendered}
+
 
 # ------------------------------------------------------------
-# Chat-Engine (deterministisch, ohne externe KI)
+# Chat (deterministisch, ohne externe KI)
 # ------------------------------------------------------------
 def chat_help() -> str:
     return (
         "**Mögliche Abfragen:**\n"
         "- `hilfe`\n"
         "- `liste klassen`\n"
-        "- `anzahl IfcPipeSegment` (oder jede andere IFC-Klasse)\n"
+        "- `anzahl IfcPump` (oder jede andere IFC-Klasse)\n"
         "- `liste IfcPump` (zeigt erste Elemente dieser Klasse)\n"
         "- `details id <GlobalId>`\n"
         "- `psets id <GlobalId>`\n"
         "- `suche \"text\"` (suche in Name/ObjectType/PredefinedType/Klasse)\n"
     )
+
 
 def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
     q = normalize(question)
@@ -269,9 +253,9 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
     if q in {"liste klassen", "klassen", "ifc klassen"}:
         cc = gindex.get("class_counts", {})
         if not cc:
-            return "Keine IfcProduct-Objekte gefunden."
-        lines = ["**IFC-Klassen im Modell (Top 40):**"]
-        top = sorted(cc.items(), key=lambda kv: kv[1], reverse=True)[:40]
+            return "Keine IFC-Objekte gezählt."
+        lines = ["**IFC-Klassen im Modell (Top 50):**"]
+        top = sorted(cc.items(), key=lambda kv: kv[1], reverse=True)[:50]
         for k, v in top:
             lines.append(f"- {k}: {v}")
         lines.append("\nTipp: `liste <Klasse>` oder `anzahl <Klasse>`.")
@@ -282,7 +266,7 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
         cls = m_cnt.group(1)
         n = gindex.get("class_counts", {}).get(cls)
         if n is None:
-            return f"Die Klasse `{cls}` kommt im Modell nicht vor (oder wurde nicht als IfcProduct gezählt)."
+            return f"Die Klasse `{cls}` kommt in der Zählung nicht vor."
         return f"**{cls}: {n}**"
 
     m_list = re.search(r"\bliste\s+([A-Za-z0-9_]+)\b", question)
@@ -290,7 +274,7 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
         cls = m_list.group(1)
         ids = gindex.get("by_class_ids", {}).get(cls, [])
         if not ids:
-            return f"Keine Elemente der Klasse `{cls}` gefunden."
+            return f"Keine Elemente der Klasse `{cls}` gefunden (oder ohne GlobalId)."
         lines = [f"**{cls} – erste {min(30, len(ids))} Elemente:**"]
         for gid in ids[:30]:
             meta = gindex["lookup"].get(gid, {"global_id": gid, "ifc_class": cls, "name": ""})
@@ -309,7 +293,6 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
             f"- Name: {meta.get('name','')}\n"
             f"- ObjectType: {meta.get('object_type','')}\n"
             f"- PredefinedType: {meta.get('predefined_type','')}\n"
-            f"- Kategorie: {meta.get('category','') or '—'}\n"
         )
 
     m_psets = re.search(r"\bpsets\s+id\s+([0-9A-Za-z_$]{6,})\b", question, flags=re.IGNORECASE)
@@ -318,7 +301,6 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
         meta = gindex.get("lookup", {}).get(gid)
         if not meta:
             return f"Kein Element mit GlobalId `{gid}` gefunden."
-        # Element im IFC wiederfinden
         try:
             elem = ifc.by_guid(gid)
         except Exception:
@@ -348,7 +330,6 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
                 normalize(meta.get("name", "")),
                 normalize(meta.get("object_type", "")),
                 normalize(meta.get("predefined_type", "")),
-                normalize(meta.get("category", "")),
             ])
             if needle in hay:
                 hits.append(meta)
@@ -361,6 +342,7 @@ def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
 
     return "Ich konnte die Anfrage nicht zuordnen. Bitte `hilfe` eingeben."
 
+
 # ------------------------------------------------------------
 # Streamlit UI
 # ------------------------------------------------------------
@@ -371,7 +353,7 @@ if not IFC_OK:
     st.error("IfcOpenShell konnte nicht geladen werden. Bitte requirements.txt prüfen.")
     st.stop()
 
-# Sidebar: IFC laden + Viewer-Klassen + Diagnose
+
 with st.sidebar:
     st.header("IFC laden")
 
@@ -399,50 +381,39 @@ with st.sidebar:
     with st.spinner("IFC wird geöffnet …"):
         ifc = ifcopenshell.open(ifc_path)
 
-    # Globaler Index (für Chat/Counts)
     with st.spinner("Index wird aufgebaut …"):
         gindex = build_global_index(ifc)
 
-    # Diagnose (kurz und nützlich)
     st.success("IFC geladen.")
     st.caption(f"IFC_GEOM_OK (Viewer): {IFC_GEOM_OK}")
+    st.caption(f"IfcProduct: {count_type(ifc, 'IfcProduct')}")
     st.caption(f"IfcSpace (Räume): {count_type(ifc, 'IfcSpace')}")
 
     st.write("---")
-    st.subheader("3D-Viewer – Klassen")
+    st.subheader("Viewer-Einstellungen")
 
-    selected_view_classes = st.multiselect(
-        "Welche IFC-Klassen sollen angezeigt werden?",
-        options=MEP_VIEW_CLASSES,
-        default=[
-            "IfcPipeSegment",
-            "IfcPipeFitting",
-            "IfcDuctSegment",
-            "IfcDuctFitting",
-            "IfcPump",
-            "IfcValve",
-        ],
-    )
-
-    st.write("---")
-    st.subheader("Kurzübersicht (MEP)")
-
-    # Zähle nur ausgewählte (und ein paar typische) Klassen, um sofort Feedback zu geben
-    quick = ["IfcPipeSegment", "IfcDuctSegment", "IfcPump", "IfcValve", "IfcSensor", "IfcActuator"]
-    cc = gindex.get("class_counts", {})
-    for t in quick:
-        st.write(f"- {t}: {cc.get(t, 0)}")
+    show_all = st.toggle("Alles anzeigen (IfcProduct)", value=True)
+    max_products = st.slider("Max. Anzahl gerenderter Produkte", 50, 2000, 800, 50)
 
     st.write("---")
     st.caption("Chat-Beispiele: `hilfe`, `liste klassen`, `liste IfcPump`, `suche \"valve\"`.")
 
-# Hauptbereich: Viewer + Chat
+
 col_view, col_chat = st.columns([6, 5])
 
 with col_view:
     st.subheader("3D-Viewer")
-    fig = plot_ifc_mesh_by_classes(ifc, classes=tuple(selected_view_classes))
-    st.plotly_chart(fig, use_container_width=True)
+
+    if show_all:
+        fig, stats = plot_ifc_mesh_all_products(ifc, max_products=max_products)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            f"Produkte gesamt: {stats['products_total']} | "
+            f"für Rendering geprüft: {stats['products_used']} | "
+            f"gerendert: {stats['rendered']}"
+        )
+    else:
+        st.info("Aktuell ist „Alles anzeigen“ deaktiviert. Aktivieren Sie es in der Sidebar.")
 
 with col_chat:
     st.subheader("Chat")
