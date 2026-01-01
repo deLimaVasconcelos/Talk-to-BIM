@@ -456,6 +456,20 @@ with st.sidebar:
         index = build_room_index(ifc)
 
     st.success(f"Geladen. Räume erkannt: {len(index.get('rooms', {}))}")
+st.write("---")
+st.subheader("Diagnose")
+
+st.write(f"IFC_OK: {IFC_OK}")
+st.write(f"IFC_GEOM_OK (ifcopenshell.geom): {IFC_GEOM_OK}")
+
+def _cnt(t):
+    try:
+        return len(ifc.by_type(t) or [])
+    except Exception:
+        return 0
+
+for t in ["IfcProject","IfcBuilding","IfcBuildingStorey","IfcSpace","IfcWall","IfcSlab","IfcCovering","IfcBuildingElementProxy"]:
+    st.write(f"{t}: {_cnt(t)}")
 
     st.write("---")
     st.subheader("GA-Kategorien (Gesamt)")
