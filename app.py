@@ -1,137 +1,88 @@
+```python
 # app.py
 # -*- coding: utf-8 -*-
 
 import os
-import re
 import tempfile
-from collections import defaultdict
-from typing import Dict, Any, List, Optional, Tuple
+from typing import List, Tuple, Optional
 
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 
 # ------------------------------------------------------------
-# IFC Import (robust)
+# IFC / Geometrie (robust)
 # ------------------------------------------------------------
 try:
     import ifcopenshell  # type: ignore
     IFC_OK = True
 except Exception:
     IFC_OK = False
-    ifcopenshell = None
+    ifcopenshell = None  # type: ignore
 
-# Optional: Geometrie (Viewer) – kann in Cloud-Umgebungen fehlen
 try:
     if IFC_OK:
         import ifcopenshell.geom as ifcgeom  # type: ignore
         IFC_GEOM_OK = True
     else:
         IFC_GEOM_OK = False
+        ifcgeom = None  # type: ignore
 except Exception:
     IFC_GEOM_OK = False
-    ifcgeom = None
+    ifcgeom = None  # type: ignore
 
 
 # ------------------------------------------------------------
-# Utilities
+# Streamlit Page
 # ------------------------------------------------------------
-def normalize(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+st.set_page_config(page_title="Talk2BIM – IFC Viewer", page_icon="🧩", layout="wide")
+st.title("Talk2BIM – IFC Viewer")
 
 
-def safe_str(x) -> str:
-    try:
-        return str(x) if x is not None else ""
-    except Exception:
-        return ""
+if not IFC_OK:
+    st.error("IfcOpenShell ist nicht verfügbar. Bitte `ifcopenshell` in requirements.txt aufnehmen.")
+    st.stop()
 
-
-def get_psets(element) -> Dict[str, Dict[str, str]]:
-    """
-    Liest einfache PropertySets:
-      IfcRelDefinesByProperties -> IfcPropertySet -> IfcPropertySingleValue
-    """
-    out: Dict[str, Dict[str, str]] = {}
-    rels = getattr(element, "IsDefinedBy", None) or []
-    for rel in rels:
-        try:
-            if not rel.is_a("IfcRelDefinesByProperties"):
-                continue
-            pdef = rel.RelatingPropertyDefinition
-            if not pdef or not pdef.is_a("IfcPropertySet"):
-                continue
-            props: Dict[str, str] = {}
-            for p in pdef.HasProperties or []:
-                if p.is_a("IfcPropertySingleValue"):
-                    name = safe_str(getattr(p, "Name", ""))
-                    nv = getattr(p, "NominalValue", None)
-                    props[name] = safe_str(getattr(nv, "wrappedValue", nv))
-            out[safe_str(getattr(pdef, "Name", "Pset"))] = props
-        except Exception:
-            continue
-    return out
-
-
-def count_type(ifc, tname: str) -> int:
-    try:
-        return len(ifc.by_type(tname) or [])
-    except Exception:
-        return 0
+if not IFC_GEOM_OK:
+    st.error(
+        "Das Geometrie-Modul `ifcopenshell.geom` ist nicht verfügbar. "
+        "In Streamlit Cloud muss `ifcopenshell` so installiert sein, dass OCC/Geom unterstützt wird."
+    )
+    st.stop()
 
 
 # ------------------------------------------------------------
-# Globaler Index (für Chat) – bewusst generisch
+# Performance: Cache IFC-Öffnen + Index
 # ------------------------------------------------------------
-def build_global_index(ifc) -> Dict[str, Any]:
-    """
-    Index über IfcRoot (fast alles Relevante hat GlobalId):
-      - class_counts: Anzahl je IFC-Klasse
-      - by_class_ids: GlobalIds je Klasse (nur wenn vorhanden)
-      - lookup: Meta je GlobalId
-    """
-    class_counts: Dict[str, int] = defaultdict(int)
-    by_class_ids: Dict[str, List[str]] = defaultdict(list)
-    lookup: Dict[str, Dict[str, Any]] = {}
-
-    try:
-        roots = ifc.by_type("IfcRoot") or []
-    except Exception:
-        roots = []
-
-    for e in roots:
-        try:
-            cls = e.is_a()
-            class_counts[cls] += 1
-
-            gid = safe_str(getattr(e, "GlobalId", ""))
-            if gid:
-                by_class_ids[cls].append(gid)
-                lookup[gid] = {
-                    "global_id": gid,
-                    "ifc_class": cls,
-                    "name": safe_str(getattr(e, "Name", "")),
-                    "object_type": safe_str(getattr(e, "ObjectType", "")),
-                    "predefined_type": safe_str(getattr(e, "PredefinedType", "")),
-                }
-        except Exception:
-            continue
-
-    return {
-        "class_counts": dict(class_counts),
-        "by_class_ids": dict(by_class_ids),
-        "lookup": lookup,
-    }
+@st.cache_data(show_spinner=False)
+def _write_bytes_to_tmp(file_bytes: bytes, suffix: str = ".ifc") -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(file_bytes)
+    tmp.close()
+    return tmp.name
 
 
-def format_item_line(meta: Dict[str, Any]) -> str:
-    return f"- {meta.get('ifc_class','')} | {meta.get('name','')} | {meta.get('global_id','')}"
+@st.cache_resource(show_spinner=False)
+def _open_ifc_from_path(path: str):
+    return ifcopenshell.open(path)
 
 
-# ------------------------------------------------------------
-# Viewer
-# ------------------------------------------------------------
-def _dummy_box_figure(note: str) -> go.Figure:
+def _make_geom_settings():
+    s = ifcgeom.settings()
+
+    def set_if_exists(attr: str, value):
+        key = getattr(s, attr, None)
+        if key is not None:
+            s.set(key, value)
+
+    set_if_exists("USE_WORLD_COORDS", True)
+    set_if_exists("WELD_VERTICES", True)
+    set_if_exists("APPLY_DEFAULT_MATERIALS", True)
+    set_if_exists("SEW_SHELLS", True)
+    return s
+
+
+def _dummy_box(note: str) -> go.Figure:
     fig = go.Figure()
     x = [0, 5, 5, 0, 0, 5, 5, 0]
     y = [0, 0, 4, 4, 0, 0, 4, 4]
@@ -139,73 +90,116 @@ def _dummy_box_figure(note: str) -> go.Figure:
     I = [0, 0, 4, 4, 0, 0, 3, 3, 0, 0, 1, 1]
     J = [1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 2, 6]
     K = [2, 3, 6, 7, 5, 4, 6, 7, 7, 4, 6, 5]
-    fig.add_trace(go.Mesh3d(x=x, y=y, z=z, i=I, j=J, k=K, opacity=0.30, flatshading=True, showscale=False))
+    fig.add_trace(go.Mesh3d(x=x, y=y, z=z, i=I, j=J, k=K, opacity=0.25, flatshading=True, showscale=False))
     fig.add_annotation(text=note, showarrow=False)
-    fig.update_layout(height=560, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
+    fig.update_layout(height=650, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
     return fig
 
 
-def plot_ifc_mesh_all_products(ifc, max_products: int = 800) -> Tuple[go.Figure, Dict[str, int]]:
+def _iter_candidate_products(ifc) -> List:
     """
-    Rendert alle IfcProduct, bei denen create_shape funktioniert.
-    Gibt zusätzlich Statistik zurück (wie viele Produkte versucht/gerendert).
+    Performance-orientiert: Nur IfcProduct mit Representation.
+    (Viele Modelle enthalten sehr viele IfcProduct ohne renderbare Repräsentation.)
     """
-    if not IFC_GEOM_OK:
-        return _dummy_box_figure("Geometrie-Backend (ifcopenshell.geom) nicht verfügbar → Dummy-Viewer"), {
-            "products_total": 0, "products_used": 0, "rendered": 0
+    try:
+        prods = ifc.by_type("IfcProduct") or []
+    except Exception:
+        return []
+    out = []
+    for e in prods:
+        if getattr(e, "Representation", None) is not None:
+            out.append(e)
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def _choose_sample_indices(n: int, max_items: int) -> np.ndarray:
+    """
+    Wählt gleichmäßig verteilte Indizes (Sampling), damit große Modelle schnell etwas zeigen.
+    """
+    if n <= 0:
+        return np.array([], dtype=int)
+    k = min(max_items, n)
+    if k == n:
+        return np.arange(n, dtype=int)
+    return np.linspace(0, n - 1, k, dtype=int)
+
+
+def render_ifc_view(ifc, max_items: int = 250) -> Tuple[go.Figure, dict]:
+    """
+    Rendert eine performante Vorschau:
+    - Kandidaten: IfcProduct mit Representation
+    - Sampling auf max_items
+    - pro Element create_shape; fehlerhafte Elemente werden übersprungen
+    """
+    settings = _make_geom_settings()
+    candidates = _iter_candidate_products(ifc)
+
+    if not candidates:
+        return _dummy_box("Keine renderbaren IfcProduct-Repräsentationen gefunden."), {
+            "candidates": 0,
+            "attempted": 0,
+            "rendered": 0,
         }
 
-    settings = ifcgeom.settings()
-
-    def set_if_exists(attr: str, value):
-        key = getattr(settings, attr, None)
-        if key is not None:
-            settings.set(key, value)
-
-    set_if_exists("USE_WORLD_COORDS", True)
-    set_if_exists("WELD_VERTICES", True)
-    set_if_exists("APPLY_DEFAULT_MATERIALS", True)
-    set_if_exists("SEW_SHELLS", True)
-
+    sel_idx = _choose_sample_indices(len(candidates), max_items)
     fig = go.Figure()
+
     mins = np.array([+1e9, +1e9, +1e9], dtype=float)
     maxs = np.array([-1e9, -1e9, -1e9], dtype=float)
 
-    try:
-        products = ifc.by_type("IfcProduct") or []
-    except Exception:
-        products = []
-
-    products_total = len(products)
-    products_used = min(products_total, max_products)
-
+    attempted = 0
     rendered = 0
 
-    for e in products[:products_used]:
+    prog = st.progress(0, text="Geometrie wird aufgebaut …")
+    total = max(1, len(sel_idx))
+
+    for t, idx in enumerate(sel_idx, start=1):
+        e = candidates[int(idx)]
+        attempted += 1
         try:
             shape = ifcgeom.create_shape(settings, e)
             verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
             faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
 
+            if verts.size == 0 or faces.size == 0:
+                continue
+
             mins = np.minimum(mins, verts.min(axis=0))
             maxs = np.maximum(maxs, verts.max(axis=0))
 
-            fig.add_trace(go.Mesh3d(
-                x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
-                i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-                opacity=0.22,
-                flatshading=True,
-                showscale=False
-            ))
+            fig.add_trace(
+                go.Mesh3d(
+                    x=verts[:, 0],
+                    y=verts[:, 1],
+                    z=verts[:, 2],
+                    i=faces[:, 0],
+                    j=faces[:, 1],
+                    k=faces[:, 2],
+                    opacity=0.22,
+                    flatshading=True,
+                    showscale=False,
+                )
+            )
             rendered += 1
         except Exception:
-            continue
+            # einzelne Elemente können scheitern; wir bleiben robust
+            pass
+
+        if t % 10 == 0 or t == total:
+            prog.progress(min(1.0, t / total), text=f"Gerendert: {rendered} / {t} geprüft")
+
+    prog.progress(1.0, text=f"Fertig. Gerendert: {rendered} / {attempted} geprüft")
 
     if rendered == 0:
-        return _dummy_box_figure(
-            "Keine Geometrie gerendert. Das IFC kann trotzdem Daten enthalten; "
-            "ggf. fehlen Repräsentationen oder create_shape schlägt pro Element fehl."
-        ), {"products_total": products_total, "products_used": products_used, "rendered": rendered}
+        return _dummy_box(
+            "Es wurden Elemente geprüft, aber keine Geometrie konnte erzeugt werden. "
+            "Das Modell kann dennoch Daten enthalten."
+        ), {
+            "candidates": len(candidates),
+            "attempted": attempted,
+            "rendered": rendered,
+        }
 
     if np.all(np.isfinite(mins)) and np.all(np.isfinite(maxs)):
         L = maxs - mins
@@ -219,217 +213,59 @@ def plot_ifc_mesh_all_products(ifc, max_products: int = 800) -> Tuple[go.Figure,
                 aspectmode="data",
             ),
             margin=dict(l=0, r=0, t=10, b=0),
-            height=560,
-            showlegend=False
+            height=650,
+            showlegend=False,
         )
     else:
-        fig.update_layout(height=560, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
+        fig.update_layout(height=650, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
 
-    return fig, {"products_total": products_total, "products_used": products_used, "rendered": rendered}
-
-
-# ------------------------------------------------------------
-# Chat (deterministisch, ohne externe KI)
-# ------------------------------------------------------------
-def chat_help() -> str:
-    return (
-        "**Mögliche Abfragen:**\n"
-        "- `hilfe`\n"
-        "- `liste klassen`\n"
-        "- `anzahl IfcPump` (oder jede andere IFC-Klasse)\n"
-        "- `liste IfcPump` (zeigt erste Elemente dieser Klasse)\n"
-        "- `details id <GlobalId>`\n"
-        "- `psets id <GlobalId>`\n"
-        "- `suche \"text\"` (suche in Name/ObjectType/PredefinedType/Klasse)\n"
-    )
-
-
-def answer(question: str, ifc, gindex: Dict[str, Any]) -> str:
-    q = normalize(question)
-
-    if q in {"hilfe", "help", "?"}:
-        return chat_help()
-
-    if q in {"liste klassen", "klassen", "ifc klassen"}:
-        cc = gindex.get("class_counts", {})
-        if not cc:
-            return "Keine IFC-Objekte gezählt."
-        lines = ["**IFC-Klassen im Modell (Top 50):**"]
-        top = sorted(cc.items(), key=lambda kv: kv[1], reverse=True)[:50]
-        for k, v in top:
-            lines.append(f"- {k}: {v}")
-        lines.append("\nTipp: `liste <Klasse>` oder `anzahl <Klasse>`.")
-        return "\n".join(lines)
-
-    m_cnt = re.search(r"\banzahl\s+([A-Za-z0-9_]+)\b", question)
-    if m_cnt:
-        cls = m_cnt.group(1)
-        n = gindex.get("class_counts", {}).get(cls)
-        if n is None:
-            return f"Die Klasse `{cls}` kommt in der Zählung nicht vor."
-        return f"**{cls}: {n}**"
-
-    m_list = re.search(r"\bliste\s+([A-Za-z0-9_]+)\b", question)
-    if m_list:
-        cls = m_list.group(1)
-        ids = gindex.get("by_class_ids", {}).get(cls, [])
-        if not ids:
-            return f"Keine Elemente der Klasse `{cls}` gefunden (oder ohne GlobalId)."
-        lines = [f"**{cls} – erste {min(30, len(ids))} Elemente:**"]
-        for gid in ids[:30]:
-            meta = gindex["lookup"].get(gid, {"global_id": gid, "ifc_class": cls, "name": ""})
-            lines.append(format_item_line(meta))
-        return "\n".join(lines)
-
-    m_details = re.search(r"\bdetails\s+id\s+([0-9A-Za-z_$]{6,})\b", question, flags=re.IGNORECASE)
-    if m_details:
-        gid = m_details.group(1)
-        meta = gindex.get("lookup", {}).get(gid)
-        if not meta:
-            return f"Kein Element mit GlobalId `{gid}` gefunden."
-        return (
-            f"**Details – {gid}:**\n"
-            f"- IFC-Klasse: {meta.get('ifc_class','')}\n"
-            f"- Name: {meta.get('name','')}\n"
-            f"- ObjectType: {meta.get('object_type','')}\n"
-            f"- PredefinedType: {meta.get('predefined_type','')}\n"
-        )
-
-    m_psets = re.search(r"\bpsets\s+id\s+([0-9A-Za-z_$]{6,})\b", question, flags=re.IGNORECASE)
-    if m_psets:
-        gid = m_psets.group(1)
-        meta = gindex.get("lookup", {}).get(gid)
-        if not meta:
-            return f"Kein Element mit GlobalId `{gid}` gefunden."
-        try:
-            elem = ifc.by_guid(gid)
-        except Exception:
-            elem = None
-        if elem is None:
-            return f"Element `{gid}` konnte im IFC nicht aufgelöst werden."
-        psets = get_psets(elem) or {}
-        if not psets:
-            return f"Für `{gid}` wurden keine PropertySets gefunden."
-        lines = [f"**PropertySets – {gid}:**"]
-        for psn, props in psets.items():
-            lines.append(f"- {psn}")
-            for k, v in list(props.items())[:35]:
-                lines.append(f"  - {k}: {v}")
-        return "\n".join(lines)
-
-    m_search = re.search(r'suche\s+"([^"]+)"', question, flags=re.IGNORECASE)
-    if m_search:
-        needle_raw = m_search.group(1).strip()
-        needle = normalize(needle_raw)
-        if not needle:
-            return "Bitte einen Suchbegriff angeben, z. B. `suche \"pumpe\"`."
-        hits = []
-        for gid, meta in gindex.get("lookup", {}).items():
-            hay = " ".join([
-                normalize(meta.get("ifc_class", "")),
-                normalize(meta.get("name", "")),
-                normalize(meta.get("object_type", "")),
-                normalize(meta.get("predefined_type", "")),
-            ])
-            if needle in hay:
-                hits.append(meta)
-        if not hits:
-            return f"Keine Treffer für „{needle_raw}“ gefunden."
-        lines = [f"**Treffer für „{needle_raw}“ (erste {min(40, len(hits))}):**"]
-        for meta in hits[:40]:
-            lines.append(format_item_line(meta))
-        return "\n".join(lines)
-
-    return "Ich konnte die Anfrage nicht zuordnen. Bitte `hilfe` eingeben."
+    return fig, {"candidates": len(candidates), "attempted": attempted, "rendered": rendered}
 
 
 # ------------------------------------------------------------
-# Streamlit UI
+# UI – nur Upload + Viewer (performant)
 # ------------------------------------------------------------
-st.set_page_config(page_title="Talk2BIM", page_icon="🗣️", layout="wide")
-st.title("Talk2BIM")
-
-if not IFC_OK:
-    st.error("IfcOpenShell konnte nicht geladen werden. Bitte requirements.txt prüfen.")
-    st.stop()
-
-
 with st.sidebar:
     st.header("IFC laden")
-
-    use_default = st.toggle("Repo-Datei verwenden (default.ifc)", value=True)
-    default_path = "default.ifc"
-
-    uploaded = None
-    if not use_default:
-        uploaded = st.file_uploader("IFC hochladen", type=["ifc", "IFC"])
-
-    if use_default:
-        if not os.path.exists(default_path):
-            st.warning("default.ifc wurde im Repository nicht gefunden.")
-            st.stop()
-        ifc_path = default_path
-    else:
-        if uploaded is None:
-            st.info("Bitte eine IFC-Datei auswählen.")
-            st.stop()
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".ifc")
-        tmp.write(uploaded.read())
-        tmp.close()
-        ifc_path = tmp.name
-
-    with st.spinner("IFC wird geöffnet …"):
-        ifc = ifcopenshell.open(ifc_path)
-
-    with st.spinner("Index wird aufgebaut …"):
-        gindex = build_global_index(ifc)
-
-    st.success("IFC geladen.")
-    st.caption(f"IFC_GEOM_OK (Viewer): {IFC_GEOM_OK}")
-    st.caption(f"IfcProduct: {count_type(ifc, 'IfcProduct')}")
-    st.caption(f"IfcSpace (Räume): {count_type(ifc, 'IfcSpace')}")
-
+    uploaded = st.file_uploader("IFC hochladen", type=["ifc", "IFC"])
     st.write("---")
-    st.subheader("Viewer-Einstellungen")
+    st.subheader("Performance")
+    max_items = st.slider(
+        "Vorschau: max. Anzahl gerenderter Elemente",
+        min_value=50,
+        max_value=800,
+        value=250,
+        step=50,
+        help="Für große Modelle sind 150–300 meist ideal. Höhere Werte können deutlich länger dauern.",
+    )
+    render_now = st.button("3D anzeigen", type="primary")
 
-    show_all = st.toggle("Alles anzeigen (IfcProduct)", value=True)
-    max_products = st.slider("Max. Anzahl gerenderter Produkte", 50, 2000, 800, 50)
+if uploaded is None:
+    st.info("Bitte links eine IFC-Datei hochladen und anschließend **„3D anzeigen“** klicken.")
+    st.stop()
 
-    st.write("---")
-    st.caption("Chat-Beispiele: `hilfe`, `liste klassen`, `liste IfcPump`, `suche \"valve\"`.")
+file_bytes = uploaded.getvalue()
+if not file_bytes:
+    st.warning("Upload ist leer. Bitte erneut hochladen.")
+    st.stop()
 
+# IFC öffnen (gecached)
+with st.spinner("IFC-Datei wird vorbereitet …"):
+    tmp_path = _write_bytes_to_tmp(file_bytes, suffix=".ifc")
+    ifc = _open_ifc_from_path(tmp_path)
 
-col_view, col_chat = st.columns([6, 5])
+# Erst rendern, wenn Nutzer klickt (wichtig für Performance & UX)
+if not render_now:
+    st.success("IFC geladen. Klicken Sie links auf **„3D anzeigen“**, um die Vorschau zu rendern.")
+    st.caption("Hinweis: Der Viewer rendert eine Stichprobe (Sampling) für schnelle Rückmeldung.")
+    st.stop()
 
-with col_view:
-    st.subheader("3D-Viewer")
-
-    if show_all:
-        fig, stats = plot_ifc_mesh_all_products(ifc, max_products=max_products)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            f"Produkte gesamt: {stats['products_total']} | "
-            f"für Rendering geprüft: {stats['products_used']} | "
-            f"gerendert: {stats['rendered']}"
-        )
-    else:
-        st.info("Aktuell ist „Alles anzeigen“ deaktiviert. Aktivieren Sie es in der Sidebar.")
-
-with col_chat:
-    st.subheader("Chat")
-
-    if "chat" not in st.session_state:
-        st.session_state.chat = [
-            {"role": "assistant", "content": "Geben Sie `hilfe` ein, um mögliche Abfragen zu sehen."}
-        ]
-
-    for m in st.session_state.chat:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-
-    user_q = st.chat_input("Frage stellen (z. B. „liste klassen“, „liste IfcPump“, „psets id …“)")
-    if user_q:
-        st.session_state.chat.append({"role": "user", "content": user_q})
-        resp = answer(user_q, ifc, gindex)
-        st.session_state.chat.append({"role": "assistant", "content": resp})
-        st.rerun()
+fig, stats = render_ifc_view(ifc, max_items=max_items)
+st.subheader("3D-Viewer")
+st.plotly_chart(fig, use_container_width=True)
+st.caption(
+    f"Kandidaten (IfcProduct mit Representation): {stats['candidates']} | "
+    f"Geprüft: {stats['attempted']} | Gerendert: {stats['rendered']} | "
+    f"Vorschau-Limit: {max_items}"
+)
+```
