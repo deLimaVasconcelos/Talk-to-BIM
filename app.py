@@ -1,4 +1,3 @@
-```python
 # app.py
 # -*- coding: utf-8 -*-
 
@@ -268,4 +267,3 @@ st.caption(
     f"Geprüft: {stats['attempted']} | Gerendert: {stats['rendered']} | "
     f"Vorschau-Limit: {max_items}"
 )
-```
