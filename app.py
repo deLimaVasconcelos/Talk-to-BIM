@@ -8,8 +8,8 @@ st.set_page_config(page_title="Talk2BIM – IFC Viewer", page_icon="🧩", layou
 st.title("Talk2BIM – IFC Viewer")
 
 st.caption(
-    "Dieser Viewer rendert clientseitig (im Browser). "
-    "Dadurch bleibt die Streamlit-Cloud speicherschonend und große IFCs sind besser handhabbar."
+    "Dieser Viewer rendert clientseitig (im Browser). Dadurch bleibt die Streamlit-Cloud "
+    "speicherschonend und große IFCs sind besser handhabbar."
 )
 
 uploaded = st.file_uploader("IFC-Datei hochladen", type=["ifc", "IFC"])
@@ -23,37 +23,38 @@ if not ifc_bytes:
     st.error("Die hochgeladene Datei ist leer.")
     st.stop()
 
-# Base64 nur als Transport in das HTML – im Browser wird daraus ein Blob und dann per IFCLoader.load() geladen.
+# Base64 als Transport in die HTML-Komponente
 ifc_b64 = base64.b64encode(ifc_bytes).decode("utf-8")
 
-html = f"""
+# KEIN f-string! Wir ersetzen nur einen Marker.
+html_template = """
 <!doctype html>
 <html lang="de">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    html, body {{
+    html, body {
       margin: 0;
       padding: 0;
       height: 100%;
       background: #ffffff;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    }}
-    #wrap {{
+    }
+    #wrap {
       height: 78vh;
       border: 1px solid #e5e7eb;
       border-radius: 12px;
       overflow: hidden;
       position: relative;
       background: #fff;
-    }}
-    #c {{
+    }
+    #c {
       width: 100%;
       height: 100%;
       display: block;
-    }}
-    #hint {{
+    }
+    #hint {
       position:absolute;
       left:12px;
       top:12px;
@@ -64,8 +65,8 @@ html = f"""
       font-size: 13px;
       color: #111827;
       z-index: 5;
-    }}
-    #status {{
+    }
+    #status {
       position:absolute;
       right:12px;
       top:12px;
@@ -79,7 +80,7 @@ html = f"""
       max-width: 45%;
       text-align: left;
       white-space: pre-wrap;
-    }}
+    }
   </style>
 </head>
 <body>
@@ -91,14 +92,14 @@ html = f"""
 
   <script type="module">
     import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
-    import {{ OrbitControls }} from "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
-    import {{ IFCLoader }} from "https://unpkg.com/web-ifc-three@0.0.152/IFCLoader.js";
+    import { OrbitControls } from "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+    import { IFCLoader } from "https://unpkg.com/web-ifc-three@0.0.152/IFCLoader.js";
 
     const statusEl = document.getElementById("status");
     const canvas = document.getElementById("c");
 
     // --- THREE Setup
-    const renderer = new THREE.WebGLRenderer({{ canvas, antialias: true, alpha: true }});
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(0xffffff, 1);
 
@@ -123,49 +124,40 @@ html = f"""
     const grid = new THREE.GridHelper(50, 50, 0xdddddd, 0xeeeeee);
     scene.add(grid);
 
-    function resize() {{
+    function resize() {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      if (canvas.width !== w || canvas.height !== h) {{
+      if (canvas.width !== w || canvas.height !== h) {
         renderer.setSize(w, h, false);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
-      }}
-    }}
+      }
+    }
 
     // --- Base64 -> Blob URL
-    function base64ToUint8Array(base64) {{
+    function base64ToUint8Array(base64) {
       const raw = atob(base64);
       const arr = new Uint8Array(raw.length);
       for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
       return arr;
-    }}
+    }
 
-    const ifcBytes = base64ToUint8Array("{ifc_b64}");
-    const blob = new Blob([ifcBytes], {{ type: "application/octet-stream" }});
+    const IFC_B64 = "__IFC_B64__";
+    const ifcBytes = base64ToUint8Array(IFC_B64);
+    const blob = new Blob([ifcBytes], { type: "application/octet-stream" });
     const blobUrl = URL.createObjectURL(blob);
 
     // --- IFC Loader
     const ifcLoader = new IFCLoader();
     ifcLoader.ifcManager.setWasmPath("https://unpkg.com/web-ifc@0.0.57/");
 
-    // Optional: etwas schneller/robuster bei großen Dateien
-    try {{
-      ifcLoader.ifcManager.applyWebIfcConfig({{
-        USE_FAST_BOOLS: true
-      }});
-    }} catch (e) {{
-      // nicht kritisch
-    }}
-
-    // --- Load IFC
     statusEl.textContent = "Lade IFC … (Parsing im Browser)";
+
     ifcLoader.load(
       blobUrl,
-      (model) => {{
+      (model) => {
         scene.add(model);
 
-        // Fit Camera to model
         const box = new THREE.Box3().setFromObject(model);
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
@@ -184,31 +176,29 @@ html = f"""
         controls.update();
 
         statusEl.textContent = "IFC geladen.";
-        // Blob URL freigeben
         URL.revokeObjectURL(blobUrl);
-      }},
-      (xhr) => {{
-        if (xhr && xhr.total) {{
+      },
+      (xhr) => {
+        if (xhr && xhr.total) {
           const p = Math.round((xhr.loaded / xhr.total) * 100);
-          statusEl.textContent = `Lade IFC … ${p}%`;
-        }}
-      }},
-      (err) => {{
+          statusEl.textContent = "Lade IFC … " + p + "%";
+        }
+      },
+      (err) => {
         console.error(err);
         statusEl.textContent =
           "Fehler beim Laden der IFC.\\n" +
           "Bitte Browser-Konsole prüfen (F12 → Console).\\n" +
-          "Mögliche Ursachen: IFC beschädigt, sehr groß, oder Web-IFC konnte nicht initialisieren.";
-      }}
+          "Mögliche Ursachen: IFC beschädigt oder Web-IFC/WASM nicht erreichbar.";
+      }
     );
 
-    // --- Render loop
-    function animate() {{
+    function animate() {
       resize();
       controls.update();
       renderer.render(scene, camera);
       requestAnimationFrame(animate);
-    }}
+    }
     requestAnimationFrame(animate);
 
     window.addEventListener("resize", resize);
@@ -216,5 +206,7 @@ html = f"""
 </body>
 </html>
 """
+
+html = html_template.replace("__IFC_B64__", ifc_b64)
 
 st.components.v1.html(html, height=850, scrolling=False)
