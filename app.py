@@ -1,16 +1,17 @@
 # app.py
 # -*- coding: utf-8 -*-
 
-import os
+import hashlib
 import tempfile
-from typing import List, Tuple, Optional
+from collections import defaultdict
+from typing import Dict, List, Tuple
 
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 
 # ------------------------------------------------------------
-# IFC / Geometrie (robust)
+# IFC / Geometrie
 # ------------------------------------------------------------
 try:
     import ifcopenshell  # type: ignore
@@ -32,11 +33,32 @@ except Exception:
 
 
 # ------------------------------------------------------------
+# Konfiguration: Community-Cloud-sicher
+# ------------------------------------------------------------
+# Hartes Render-Limit (ohne UI) – verhindert Memory-Lockups
+MAX_RENDER_TOTAL = 350           # konservativ: 250–450
+PER_CLASS_CAP = 120              # pro Klasse
+OPACITY = 0.22
+
+# Sinnvolle GA/MEP-Defaults (zeigt "alles Relevante" statt "alles IfcProduct")
+MEP_DEFAULT = [
+    "IfcPipeSegment", "IfcPipeFitting",
+    "IfcDuctSegment", "IfcDuctFitting",
+    "IfcValve", "IfcPump",
+    "IfcSensor", "IfcActuator",
+    "IfcFlowInstrument", "IfcFlowMeter",
+    "IfcDamper", "IfcFilter",
+    "IfcCoil", "IfcTank", "IfcHeatExchanger", "IfcFan",
+    "IfcElectricMotor", "IfcCompressor",
+    "IfcDistributionControlElement",
+]
+
+
+# ------------------------------------------------------------
 # Streamlit Page
 # ------------------------------------------------------------
 st.set_page_config(page_title="Talk2BIM – IFC Viewer", page_icon="🧩", layout="wide")
 st.title("Talk2BIM – IFC Viewer")
-
 
 if not IFC_OK:
     st.error("IfcOpenShell ist nicht verfügbar. Bitte `ifcopenshell` in requirements.txt aufnehmen.")
@@ -45,28 +67,53 @@ if not IFC_OK:
 if not IFC_GEOM_OK:
     st.error(
         "Das Geometrie-Modul `ifcopenshell.geom` ist nicht verfügbar. "
-        "In Streamlit Cloud muss `ifcopenshell` so installiert sein, dass OCC/Geom unterstützt wird."
+        "In Streamlit Cloud muss `ifcopenshell` mit Geometrie-Unterstützung verfügbar sein."
     )
     st.stop()
 
 
 # ------------------------------------------------------------
-# Performance: Cache IFC-Öffnen + Index
+# Utilities / Cache
 # ------------------------------------------------------------
+def sha1(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()
+
+
 @st.cache_data(show_spinner=False)
-def _write_bytes_to_tmp(file_bytes: bytes, suffix: str = ".ifc") -> str:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+def write_tmp_ifc(file_bytes: bytes) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".ifc")
     tmp.write(file_bytes)
     tmp.close()
     return tmp.name
 
 
 @st.cache_resource(show_spinner=False)
-def _open_ifc_from_path(path: str):
+def open_ifc(path: str):
     return ifcopenshell.open(path)
 
 
-def _make_geom_settings():
+@st.cache_data(show_spinner=False)
+def collect_class_counts_renderable(ifc_path: str) -> Dict[str, int]:
+    """
+    Zählt nur IfcProduct mit Representation (renderbar).
+    """
+    ifc = ifcopenshell.open(ifc_path)
+    counts: Dict[str, int] = defaultdict(int)
+    try:
+        prods = ifc.by_type("IfcProduct") or []
+    except Exception:
+        prods = []
+    for e in prods:
+        try:
+            if getattr(e, "Representation", None) is None:
+                continue
+            counts[e.is_a()] += 1
+        except Exception:
+            continue
+    return dict(counts)
+
+
+def make_settings():
     s = ifcgeom.settings()
 
     def set_if_exists(attr: str, value):
@@ -81,7 +128,7 @@ def _make_geom_settings():
     return s
 
 
-def _dummy_box(note: str) -> go.Figure:
+def dummy_box(note: str) -> go.Figure:
     fig = go.Figure()
     x = [0, 5, 5, 0, 0, 5, 5, 0]
     y = [0, 0, 4, 4, 0, 0, 4, 4]
@@ -95,53 +142,21 @@ def _dummy_box(note: str) -> go.Figure:
     return fig
 
 
-def _iter_candidate_products(ifc) -> List:
-    """
-    Performance-orientiert: Nur IfcProduct mit Representation.
-    (Viele Modelle enthalten sehr viele IfcProduct ohne renderbare Repräsentation.)
-    """
-    try:
-        prods = ifc.by_type("IfcProduct") or []
-    except Exception:
-        return []
-    out = []
-    for e in prods:
-        if getattr(e, "Representation", None) is not None:
-            out.append(e)
-    return out
-
-
-@st.cache_data(show_spinner=False)
-def _choose_sample_indices(n: int, max_items: int) -> np.ndarray:
-    """
-    Wählt gleichmäßig verteilte Indizes (Sampling), damit große Modelle schnell etwas zeigen.
-    """
-    if n <= 0:
+def choose_even_indices(n: int, k: int) -> np.ndarray:
+    if n <= 0 or k <= 0:
         return np.array([], dtype=int)
-    k = min(max_items, n)
+    k = min(k, n)
     if k == n:
         return np.arange(n, dtype=int)
     return np.linspace(0, n - 1, k, dtype=int)
 
 
-def render_ifc_view(ifc, max_items: int = 250) -> Tuple[go.Figure, dict]:
+def render_ifc_classes_sampled(ifc, classes: List[str], per_class_cap: int, total_cap: int) -> Tuple[go.Figure, Dict[str, int]]:
     """
-    Rendert eine performante Vorschau:
-    - Kandidaten: IfcProduct mit Representation
-    - Sampling auf max_items
-    - pro Element create_shape; fehlerhafte Elemente werden übersprungen
+    Render: pro Klasse cap + Sampling, Gesamtcap.
+    Stabil für Cloud-Limits.
     """
-    settings = _make_geom_settings()
-    candidates = _iter_candidate_products(ifc)
-
-    if not candidates:
-        return _dummy_box("Keine renderbaren IfcProduct-Repräsentationen gefunden."), {
-            "candidates": 0,
-            "attempted": 0,
-            "rendered": 0,
-        }
-
-    sel_idx = _choose_sample_indices(len(candidates), max_items)
+    settings = make_settings()
     fig = go.Figure()
 
     mins = np.array([+1e9, +1e9, +1e9], dtype=float)
@@ -151,53 +166,62 @@ def render_ifc_view(ifc, max_items: int = 250) -> Tuple[go.Figure, dict]:
     rendered = 0
 
     prog = st.progress(0, text="Geometrie wird aufgebaut …")
-    total = max(1, len(sel_idx))
+    cls_total = max(1, len(classes))
+    cls_done = 0
 
-    for t, idx in enumerate(sel_idx, start=1):
-        e = candidates[int(idx)]
-        attempted += 1
+    for cls in classes:
+        if rendered >= total_cap:
+            break
+
         try:
-            shape = ifcgeom.create_shape(settings, e)
-            verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
-            faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
+            elems = ifc.by_type(cls) or []
+        except Exception:
+            elems = []
 
-            if verts.size == 0 or faces.size == 0:
+        # nur renderbare
+        elems = [e for e in elems if getattr(e, "Representation", None) is not None]
+        if not elems:
+            cls_done += 1
+            prog.progress(min(1.0, cls_done / cls_total), text=f"Gerendert: {rendered}")
+            continue
+
+        # Sampling innerhalb der Klasse
+        take = min(per_class_cap, len(elems), max(1, total_cap - rendered))
+        idxs = choose_even_indices(len(elems), take)
+
+        for idx in idxs:
+            if rendered >= total_cap:
+                break
+
+            e = elems[int(idx)]
+            attempted += 1
+            try:
+                shape = ifcgeom.create_shape(settings, e)
+                verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
+                faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
+                if verts.size == 0 or faces.size == 0:
+                    continue
+
+                mins = np.minimum(mins, verts.min(axis=0))
+                maxs = np.maximum(maxs, verts.max(axis=0))
+
+                fig.add_trace(go.Mesh3d(
+                    x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                    i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                    opacity=OPACITY, flatshading=True, showscale=False
+                ))
+                rendered += 1
+            except Exception:
                 continue
 
-            mins = np.minimum(mins, verts.min(axis=0))
-            maxs = np.maximum(maxs, verts.max(axis=0))
+        cls_done += 1
+        prog.progress(min(1.0, cls_done / cls_total), text=f"Gerendert: {rendered} (geprüft: {attempted})")
 
-            fig.add_trace(
-                go.Mesh3d(
-                    x=verts[:, 0],
-                    y=verts[:, 1],
-                    z=verts[:, 2],
-                    i=faces[:, 0],
-                    j=faces[:, 1],
-                    k=faces[:, 2],
-                    opacity=0.22,
-                    flatshading=True,
-                    showscale=False,
-                )
-            )
-            rendered += 1
-        except Exception:
-            # einzelne Elemente können scheitern; wir bleiben robust
-            pass
-
-        if t % 10 == 0 or t == total:
-            prog.progress(min(1.0, t / total), text=f"Gerendert: {rendered} / {t} geprüft")
-
-    prog.progress(1.0, text=f"Fertig. Gerendert: {rendered} / {attempted} geprüft")
+    prog.progress(1.0, text=f"Fertig. Gerendert: {rendered} (geprüft: {attempted})")
 
     if rendered == 0:
-        return _dummy_box(
-            "Es wurden Elemente geprüft, aber keine Geometrie konnte erzeugt werden. "
-            "Das Modell kann dennoch Daten enthalten."
-        ), {
-            "candidates": len(candidates),
-            "attempted": attempted,
-            "rendered": rendered,
+        return dummy_box("Keine Geometrie gerendert. (Representation fehlt oder create_shape scheitert.)"), {
+            "attempted": attempted, "rendered": rendered
         }
 
     if np.all(np.isfinite(mins)) and np.all(np.isfinite(maxs)):
@@ -213,34 +237,26 @@ def render_ifc_view(ifc, max_items: int = 250) -> Tuple[go.Figure, dict]:
             ),
             margin=dict(l=0, r=0, t=10, b=0),
             height=650,
-            showlegend=False,
+            showlegend=False
         )
     else:
         fig.update_layout(height=650, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
 
-    return fig, {"candidates": len(candidates), "attempted": attempted, "rendered": rendered}
+    return fig, {"attempted": attempted, "rendered": rendered}
 
 
 # ------------------------------------------------------------
-# UI – nur Upload + Viewer (performant)
+# UI (nur Upload + Viewer; keine Bot-UI)
 # ------------------------------------------------------------
 with st.sidebar:
-    st.header("IFC laden")
-    uploaded = st.file_uploader("IFC hochladen", type=["ifc", "IFC"])
+    st.header("IFC hochladen")
+    uploaded = st.file_uploader("Datei auswählen", type=["ifc", "IFC"])
+
     st.write("---")
-    st.subheader("Performance")
-    max_items = st.slider(
-        "Vorschau: max. Anzahl gerenderter Elemente",
-        min_value=50,
-        max_value=800,
-        value=250,
-        step=50,
-        help="Für große Modelle sind 150–300 meist ideal. Höhere Werte können deutlich länger dauern.",
-    )
-    render_now = st.button("3D anzeigen", type="primary")
+    st.caption("Standard: GA/MEP-Klassen (performant). Optional kann man Klassen abwählen.")
 
 if uploaded is None:
-    st.info("Bitte links eine IFC-Datei hochladen und anschließend **„3D anzeigen“** klicken.")
+    st.info("Bitte eine IFC-Datei hochladen.")
     st.stop()
 
 file_bytes = uploaded.getvalue()
@@ -248,22 +264,63 @@ if not file_bytes:
     st.warning("Upload ist leer. Bitte erneut hochladen.")
     st.stop()
 
-# IFC öffnen (gecached)
-with st.spinner("IFC-Datei wird vorbereitet …"):
-    tmp_path = _write_bytes_to_tmp(file_bytes, suffix=".ifc")
-    ifc = _open_ifc_from_path(tmp_path)
+h = sha1(file_bytes)
 
-# Erst rendern, wenn Nutzer klickt (wichtig für Performance & UX)
-if not render_now:
-    st.success("IFC geladen. Klicken Sie links auf **„3D anzeigen“**, um die Vorschau zu rendern.")
-    st.caption("Hinweis: Der Viewer rendert eine Stichprobe (Sampling) für schnelle Rückmeldung.")
-    st.stop()
+# Session stabilisieren
+if "ifc_hash" not in st.session_state or st.session_state.ifc_hash != h:
+    st.session_state.ifc_hash = h
+    st.session_state.ifc_path = write_tmp_ifc(file_bytes)
+    st.session_state.class_counts = None
+    st.session_state.selected_classes = None
 
-fig, stats = render_ifc_view(ifc, max_items=max_items)
+# IFC öffnen
+with st.spinner("IFC wird geöffnet …"):
+    ifc = open_ifc(st.session_state.ifc_path)
+
+# Klassen zählen (renderbar)
+if st.session_state.class_counts is None:
+    with st.spinner("Klassen werden ermittelt …"):
+        st.session_state.class_counts = collect_class_counts_renderable(st.session_state.ifc_path)
+
+counts: Dict[str, int] = st.session_state.class_counts or {}
+available = sorted(counts.keys(), key=lambda k: counts.get(k, 0), reverse=True)
+
+# Default: MEP_DEFAULT ∩ verfügbare Klassen; wenn leer, dann alle
+default_classes = [c for c in MEP_DEFAULT if c in counts and counts.get(c, 0) > 0]
+if not default_classes:
+    default_classes = available
+
+# Optionaler Filter (nur Klassen)
+with st.sidebar:
+    with st.expander("Klassen (optional)"):
+        if not available:
+            st.warning("Keine renderbaren Klassen gefunden.")
+        else:
+            sel = st.multiselect(
+                "Anzeige-Klassen",
+                options=available,
+                default=default_classes,
+                help="Für Community Cloud ist das Rendern ALLER Produkte oft zu speicherintensiv. "
+                     "MEP-Defaults sind meist ausreichend."
+            )
+            st.session_state.selected_classes = sel
+
+selected_classes = st.session_state.selected_classes or default_classes
+
 st.subheader("3D-Viewer")
+
+# Render (cloud-sicher)
+fig, stats = render_ifc_classes_sampled(
+    ifc,
+    classes=selected_classes,
+    per_class_cap=PER_CLASS_CAP,
+    total_cap=MAX_RENDER_TOTAL
+)
+
 st.plotly_chart(fig, use_container_width=True)
+
 st.caption(
-    f"Kandidaten (IfcProduct mit Representation): {stats['candidates']} | "
-    f"Geprüft: {stats['attempted']} | Gerendert: {stats['rendered']} | "
-    f"Vorschau-Limit: {max_items}"
+    f"Gerendert (Stichprobe): {stats.get('rendered', 0)} Elemente | "
+    f"Geprüft: {stats.get('attempted', 0)} | "
+    f"Limits: total={MAX_RENDER_TOTAL}, pro Klasse={PER_CLASS_CAP}"
 )
